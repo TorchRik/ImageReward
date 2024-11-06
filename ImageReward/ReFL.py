@@ -34,6 +34,7 @@ from transformers import CLIPTextModel, CLIPTokenizer
 import io
 from PIL import Image
 import ImageReward as RM
+import pick_score
 
 from torchvision.transforms import Compose, Resize, CenterCrop, Normalize
 try:
@@ -413,7 +414,7 @@ class Trainer(object):
         self.unet = UNet2DConditionModel.from_pretrained(
             self.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
         )
-        self.reward_model = RM.load("ImageReward-v1.0", device=self.accelerator.device)
+        self.reward_model = pick_score.PickScore()
 
         # Freeze vae and text_encoder
         self.vae.requires_grad_(False)
@@ -575,8 +576,15 @@ class Trainer(object):
 
         def preprocess_train(examples):
             examples["input_ids"] = tokenize_captions(examples)
-            examples["rm_input_ids"] = self.reward_model.blip.tokenizer(examples[caption_column], padding='max_length', truncation=True, max_length=35, return_tensors="pt").input_ids
-            examples["rm_attention_mask"] = self.reward_model.blip.tokenizer(examples[caption_column], padding='max_length', truncation=True, max_length=35, return_tensors="pt").attention_mask
+            processed = self.reward_model.tokenize(
+                examples[caption_column],
+                padding='max_length',
+                truncation=True,
+                max_length=77,
+                return_tensors="pt"
+            )
+            examples["rm_input_ids"] = processed.input_ids
+            examples["rm_attention_mask"] = processed.attention_mask
             return examples
 
         with self.accelerator.main_process_first():
@@ -751,7 +759,11 @@ class Trainer(object):
                     rm_preprocess = _transform()
                     image = rm_preprocess(image).to(self.accelerator.device)
                     
-                    rewards = self.reward_model.score_gard(batch["rm_input_ids"], batch["rm_attention_mask"], image)
+                    rewards = self.reward_model.score_gard(
+                        batch["rm_input_ids"], batch["rm_attention_mask"], image
+                    )
+                    print(rewards)
+                    print('image shape:', type(image))
                     loss = F.relu(-rewards+2)
                     loss = loss.mean() * args.grad_scale
 
