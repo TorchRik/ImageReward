@@ -1,4 +1,4 @@
-'''
+"""
 @File       :   utils.py
 @Time       :   2023/04/05 19:18:00
 @Auther     :   Jiazheng Xu
@@ -9,20 +9,20 @@
 * https://github.com/openai/CLIP
 * https://github.com/salesforce/BLIP
 * https://github.com/christophschuhmann/improved-aesthetic-predictor
-'''
+"""
 
-import hashlib
 import os
 import urllib
-import warnings
-from typing import Any, Union, List
-from .ImageReward import ImageReward
+from typing import Any, List, Union
+
 import torch
-from tqdm import tqdm
 from huggingface_hub import hf_hub_download
-from .models.CLIPScore import CLIPScore
-from .models.BLIPScore import BLIPScore
+from tqdm import tqdm
+
+from .ImageReward import ImageReward
 from .models.AestheticScore import AestheticScore
+from .models.BLIPScore import BLIPScore
+from .models.CLIPScore import CLIPScore
 
 _MODELS = {
     "ImageReward-v1.0": "https://huggingface.co/THUDM/ImageReward/blob/main/ImageReward.pt",
@@ -42,7 +42,12 @@ def ImageReward_download(url: str, root: str):
     return download_target
 
 
-def load(name: str = "ImageReward-v1.0", device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu", download_root: str = None, med_config: str = None):
+def load(
+    name: str = "ImageReward-v1.0",
+    device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu",
+    download_root: str = None,
+    med_config: str = None,
+):
     """Load a ImageReward model
 
     Parameters
@@ -62,21 +67,28 @@ def load(name: str = "ImageReward-v1.0", device: Union[str, torch.device] = "cud
         The ImageReward model
     """
     if name in _MODELS:
-        model_path = ImageReward_download(_MODELS[name], download_root or os.path.expanduser("~/.cache/ImageReward"))
+        model_path = ImageReward_download(
+            _MODELS[name], download_root or os.path.expanduser("~/.cache/ImageReward")
+        )
     elif os.path.isfile(name):
         model_path = name
     else:
-        raise RuntimeError(f"Model {name} not found; available models = {available_models()}")
+        raise RuntimeError(
+            f"Model {name} not found; available models = {available_models()}"
+        )
 
-    print('load checkpoint from %s'%model_path)
-    state_dict = torch.load(model_path, map_location='cpu')
-    
+    print("load checkpoint from %s" % model_path)
+    state_dict = torch.load(model_path, map_location="cpu")
+
     # med_config
     if med_config is None:
-        med_config = ImageReward_download("https://huggingface.co/THUDM/ImageReward/blob/main/med_config.json", download_root or os.path.expanduser("~/.cache/ImageReward"))
-    
+        med_config = ImageReward_download(
+            "https://huggingface.co/THUDM/ImageReward/blob/main/med_config.json",
+            download_root or os.path.expanduser("~/.cache/ImageReward"),
+        )
+
     model = ImageReward(device=device, med_config=med_config).to(device)
-    msg = model.load_state_dict(state_dict,strict=False)
+    msg = model.load_state_dict(state_dict, strict=False)
     print("checkpoint loaded")
     model.eval()
 
@@ -108,7 +120,13 @@ def _download(url: str, root: str):
         return download_target
 
     with urllib.request.urlopen(url) as source, open(download_target, "wb") as output:
-        with tqdm(total=int(source.info().get("Content-Length")), ncols=80, unit='iB', unit_scale=True, unit_divisor=1024) as loop:
+        with tqdm(
+            total=int(source.info().get("Content-Length")),
+            ncols=80,
+            unit="iB",
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as loop:
             while True:
                 buffer = source.read(8192)
                 if not buffer:
@@ -120,7 +138,11 @@ def _download(url: str, root: str):
     return download_target
 
 
-def load_score(name: str = "CLIP", device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu", download_root: str = None):
+def load_score(
+    name: str = "CLIP",
+    device: Union[str, torch.device] = "cuda" if torch.cuda.is_available() else "cpu",
+    download_root: str = None,
+):
     """Load a ImageReward model
 
     Parameters
@@ -140,27 +162,36 @@ def load_score(name: str = "CLIP", device: Union[str, torch.device] = "cuda" if 
         The ImageReward model
     """
     model_download_root = download_root or os.path.expanduser("~/.cache/ImageReward")
-    
+
     if name in _SCORES:
         model_path = _download(_SCORES[name], model_download_root)
     else:
-        raise RuntimeError(f"Score {name} not found; available scores = {available_scores()}")
+        raise RuntimeError(
+            f"Score {name} not found; available scores = {available_scores()}"
+        )
 
-    print('load checkpoint from %s'%model_path)
+    print("load checkpoint from %s" % model_path)
     if name == "BLIP":
-        state_dict = torch.load(model_path, map_location='cpu')
-        med_config = ImageReward_download("https://huggingface.co/THUDM/ImageReward/blob/main/med_config.json", model_download_root)
+        state_dict = torch.load(model_path, map_location="cpu")
+        med_config = ImageReward_download(
+            "https://huggingface.co/THUDM/ImageReward/blob/main/med_config.json",
+            model_download_root,
+        )
         model = BLIPScore(med_config=med_config, device=device).to(device)
-        model.blip.load_state_dict(state_dict['model'],strict=False)
+        model.blip.load_state_dict(state_dict["model"], strict=False)
     elif name == "CLIP":
         model = CLIPScore(download_root=model_download_root, device=device).to(device)
     elif name == "Aesthetic":
-        state_dict = torch.load(model_path, map_location='cpu')
-        model = AestheticScore(download_root=model_download_root, device=device).to(device)
-        model.mlp.load_state_dict(state_dict,strict=False)
+        state_dict = torch.load(model_path, map_location="cpu")
+        model = AestheticScore(download_root=model_download_root, device=device).to(
+            device
+        )
+        model.mlp.load_state_dict(state_dict, strict=False)
     else:
-        raise RuntimeError(f"Score {name} not found; available scores = {available_scores()}")
-    
+        raise RuntimeError(
+            f"Score {name} not found; available scores = {available_scores()}"
+        )
+
     print("checkpoint loaded")
     model.eval()
 

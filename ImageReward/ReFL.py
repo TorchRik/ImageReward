@@ -17,7 +17,6 @@ from pathlib import Path
 
 import accelerate
 import numpy as np
-import pick_score as PS
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -486,7 +485,7 @@ class Trainer(object):
             revision=args.non_ema_revision,
         )
 
-        self.reward_model_1 = PS.PickScore(device=self.accelerator.device)
+        self.reward_model_1 = RM.PickScore(device=self.accelerator.device)
         self.reward_model_2 = RM.ImageReward(device=self.accelerator.device)
 
         # Freeze vae and text_encoder
