@@ -98,7 +98,7 @@ class ImageReward(nn.Module):
         )
         return res.input_ids, res.attention_mask
 
-    def score_gard(self, prompt_ids, prompt_attention_mask, image):
+    def score_grad(self, prompt_ids, prompt_attention_mask, image):
         image_embeds = self.blip.visual_encoder(image)
         # text encode cross attention with image
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(

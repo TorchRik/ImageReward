@@ -875,7 +875,7 @@ class Trainer(object):
                         progress_bar.update(1)
                     continue
 
-                with self.accelerator.accumulate(self.unet):
+                with (self.accelerator.accumulate(self.unet)):
                     encoder_hidden_states = self.text_encoder(batch["input_ids"])[0]
                     latents = torch.randn(
                         (args.train_batch_size, 4, 64, 64),
@@ -923,9 +923,9 @@ class Trainer(object):
                     image = self.vae.decode(
                         pred_original_sample.to(self.weight_dtype)
                     ).sample
-                    image = self.image_processor.postprocess(
-                        image, output_type="pt", do_denormalize=[True] * image.shape[0]
-                    )
+                    # image = self.image_processor.postprocess(
+                    #     image, output_type="pt", do_denormalize=[True] * image.shape[0]
+                    # )
                     image = (image / 2 + 0.5).clamp(0, 1)
 
                     # image encode
@@ -943,15 +943,26 @@ class Trainer(object):
 
                     rm_preprocess = _transform()
                     image = rm_preprocess(image).to(self.accelerator.device)
-                    torch.save(image.cpu(), "image_example")
 
-                    rewards = self.reward_model_1.score_grad(
+                    reward_1 = self.reward_model_1.score_grad(
                         batch["rm_input_ids_1"], batch["rm_attention_mask_1"], image
-                    ) + self.reward_model_2.score_grad(
+                    )
+                    reward_2 = self.reward_model_2.score_grad(
                         batch["rm_input_ids_2"], batch["rm_attention_mask_2"], image
                     )
+                    rewards = reward_1 + reward_2
                     loss = F.relu(-rewards * 0.5 + 2)
                     loss = loss.mean() * args.grad_scale
+                    reward_1 = (
+                            reward_1.mean().detach().item() *
+                            self.reward_model_1.std +
+                            self.reward_model_1.mean
+                    )
+                    reward_2 = (
+                            reward_2.mean().detach().item() *
+                            self.reward_model_2.std +
+                            self.reward_model_2.mean
+                    )
 
                     # Gather the losses across all processes for logging (if we use distributed training).
                     avg_loss = self.accelerator.gather(
@@ -977,8 +988,15 @@ class Trainer(object):
                     global_step += 1
                     self.accelerator.log({"train_loss": train_loss}, step=global_step)
                     if is_wandb_available():
-                        wandb.log({"train_loss": train_loss}, step=global_step)
-                        wandb.log({"train_reward": 2 - train_loss}, step=global_step)
+                        wandb.log({"step_loss": loss.detach().item()},
+                                  step=global_step)
+                        wandb.log({"reward_1": reward_1},
+                                  step=global_step)
+                        wandb.log({"reward_2": reward_2},
+                                  step=global_step)
+                        wandb.log({"lr": self.lr_scheduler.get_last_lr()[0], },
+                                  step=global_step)
+
                     train_loss = 0.0
 
                     if global_step % args.checkpointing_steps == 0:
@@ -993,6 +1011,7 @@ class Trainer(object):
                     "step_loss": loss.detach().item(),
                     "lr": self.lr_scheduler.get_last_lr()[0],
                 }
+
                 progress_bar.set_postfix(**logs)
 
                 if global_step >= args.max_train_steps:
