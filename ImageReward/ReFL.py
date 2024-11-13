@@ -768,7 +768,8 @@ class Trainer(object):
         # Move text_encode and vae to gpu and cast to self.weight_dtype
         self.text_encoder.to(self.accelerator.device, dtype=self.weight_dtype)
         self.vae.to(self.accelerator.device, dtype=self.weight_dtype)
-        self.reward_model.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.reward_model_1.to(self.accelerator.device, dtype=self.weight_dtype)
+        self.reward_model_2.to(self.accelerator.device, dtype=self.weight_dtype)
 
         # We need to recalculate our total training steps as the size of the training dataloader may have changed.
         self.num_update_steps_per_epoch = math.ceil(
