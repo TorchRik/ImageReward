@@ -55,7 +55,7 @@ from diffusers.utils.import_utils import is_xformers_available
 
 if is_wandb_available():
     import wandb
-
+    wandb.init()
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.16.0.dev0")
 
