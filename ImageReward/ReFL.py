@@ -486,7 +486,10 @@ class Trainer(object):
         )
 
         self.reward_model_1 = RM.PickScore(device=self.accelerator.device)
-        self.reward_model_2 = RM.ImageReward(device=self.accelerator.device)
+        self.reward_model_2 = RM.load(
+            "ImageReward-v1.0",
+            device=self.accelerator.device
+        )
 
         # Freeze vae and text_encoder
         self.vae.requires_grad_(False)
