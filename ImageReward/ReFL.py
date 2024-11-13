@@ -702,19 +702,33 @@ class Trainer(object):
 
         def collate_fn(examples):
             input_ids = torch.stack([example["input_ids"] for example in examples])
-            rm_input_ids = torch.stack(
-                [example["rm_input_ids"] for example in examples]
-            )
-            rm_attention_mask = torch.stack(
-                [example["rm_attention_mask"] for example in examples]
-            )
             input_ids = input_ids.view(-1, input_ids.shape[-1])
-            rm_input_ids = rm_input_ids.view(-1, rm_input_ids.shape[-1])
-            rm_attention_mask = rm_attention_mask.view(-1, rm_attention_mask.shape[-1])
+
+            rm_input_ids_1 = torch.stack(
+                [example["rm_input_ids_1"] for example in examples]
+            )
+            rm_attention_mask_1 = torch.stack(
+                [example["rm_attention_mask_1"] for example in examples]
+            )
+            rm_input_ids_1 = rm_input_ids_1.view(-1, rm_input_ids_1.shape[-1])
+            rm_attention_mask_1 = rm_attention_mask_1.view(-1, rm_attention_mask_1.shape[-1])
+
+            rm_input_ids_2 = torch.stack(
+                [example["rm_input_ids_2"] for example in examples]
+            )
+            rm_attention_mask_2 = torch.stack(
+                [example["rm_attention_mask_2"] for example in examples]
+            )
+            rm_input_ids_2 = rm_input_ids_2.view(-1, rm_input_ids_2.shape[-1])
+            rm_attention_mask_2 = rm_attention_mask_2.view(-1,
+                                                           rm_attention_mask_2.shape[
+                                                               -1])
             return {
                 "input_ids": input_ids,
-                "rm_input_ids": rm_input_ids,
-                "rm_attention_mask": rm_attention_mask,
+                "rm_input_ids_1": rm_input_ids_1,
+                "rm_attention_mask_1": rm_attention_mask_1,
+                "rm_input_ids_2": rm_input_ids_2,
+                "rm_attention_mask_2": rm_attention_mask_2,
             }
 
         # DataLoaders creation:
