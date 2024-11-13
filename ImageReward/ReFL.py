@@ -1,4 +1,4 @@
-'''
+"""
 @File       :   ReFL.py
 @Time       :   2023/05/01 19:36:00
 @Auther     :   Jiazheng Xu
@@ -6,7 +6,7 @@
 @Description:   ReFL Algorithm.
 * Based on diffusers code base
 * https://github.com/huggingface/diffusers/blob/main/examples/text_to_image/train_text_to_image.py
-'''
+"""
 
 import argparse
 import logging
@@ -17,6 +17,7 @@ from pathlib import Path
 
 import accelerate
 import numpy as np
+import pick_score as PS
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -27,33 +28,34 @@ from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
-from torchvision import transforms
+from PIL import Image
+from torchvision.transforms import CenterCrop, Compose, Normalize, Resize, ToTensor
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
-import io
-from PIL import Image
 import ImageReward as RM
-import pick_score
 
-from torchvision.transforms import Compose, Resize, CenterCrop, Normalize
 try:
     from torchvision.transforms import InterpolationMode
+
     BICUBIC = InterpolationMode.BICUBIC
 except ImportError:
     BICUBIC = Image.BICUBIC
 
 import diffusers
-from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
+from diffusers import (
+    AutoencoderKL,
+    DDPMScheduler,
+    StableDiffusionPipeline,
+    UNet2DConditionModel,
+)
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import check_min_version, deprecate, is_wandb_available
 from diffusers.utils.import_utils import is_xformers_available
 
-
 if is_wandb_available():
     import wandb
-
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.16.0.dev0")
@@ -68,10 +70,16 @@ DATASET_NAME_MAPPING = {
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument(
-        "--grad_scale", type=float, default=1e-3, help="Scale divided for grad loss value."
+        "--grad_scale",
+        type=float,
+        default=1e-3,
+        help="Scale divided for grad loss value.",
     )
     parser.add_argument(
-        "--input_pertubation", type=float, default=0, help="The scale of input pretubation. Recommended 0.1."
+        "--input_pertubation",
+        type=float,
+        default=0,
+        help="The scale of input pretubation. Recommended 0.1.",
     )
     parser.add_argument(
         "--revision",
@@ -97,7 +105,10 @@ def parse_args():
         help="The config of the Dataset, leave as None if there's only one config.",
     )
     parser.add_argument(
-        "--image_column", type=str, default="image", help="The column of the dataset containing an image."
+        "--image_column",
+        type=str,
+        default="image",
+        help="The column of the dataset containing an image.",
     )
     parser.add_argument(
         "--caption_column",
@@ -119,7 +130,9 @@ def parse_args():
         type=str,
         default=None,
         nargs="+",
-        help=("A set of prompts evaluated every `--validation_epochs` and logged to `--report_to`."),
+        help=(
+            "A set of prompts evaluated every `--validation_epochs` and logged to `--report_to`."
+        ),
     )
     parser.add_argument(
         "--output_dir",
@@ -133,7 +146,9 @@ def parse_args():
         default=None,
         help="The directory where the downloaded models and datasets will be stored.",
     )
-    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
+    parser.add_argument(
+        "--seed", type=int, default=None, help="A seed for reproducible training."
+    )
     parser.add_argument(
         "--resolution",
         type=int,
@@ -158,7 +173,10 @@ def parse_args():
         help="whether to randomly flip images horizontally",
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=2, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size",
+        type=int,
+        default=2,
+        help="Batch size (per device) for the training dataloader.",
     )
     parser.add_argument("--num_train_epochs", type=int, default=100)
     parser.add_argument(
@@ -200,7 +218,10 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--lr_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
+        "--lr_warmup_steps",
+        type=int,
+        default=0,
+        help="Number of steps for the warmup in the lr scheduler.",
     )
     parser.add_argument(
         "--snr_gamma",
@@ -210,7 +231,9 @@ def parse_args():
         "More details here: https://arxiv.org/abs/2303.09556.",
     )
     parser.add_argument(
-        "--use_8bit_adam", action="store_true", help="Whether or not to use 8-bit Adam from bitsandbytes."
+        "--use_8bit_adam",
+        action="store_true",
+        help="Whether or not to use 8-bit Adam from bitsandbytes.",
     )
     parser.add_argument(
         "--allow_tf32",
@@ -220,7 +243,9 @@ def parse_args():
             " https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices"
         ),
     )
-    parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA model.")
+    parser.add_argument(
+        "--use_ema", action="store_true", help="Whether to use EMA model."
+    )
     parser.add_argument(
         "--non_ema_revision",
         type=str,
@@ -239,13 +264,41 @@ def parse_args():
             "Number of subprocesses to use for data loading. 0 means that the data will be loaded in the main process."
         ),
     )
-    parser.add_argument("--adam_beta1", type=float, default=0.9, help="The beta1 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_beta2", type=float, default=0.999, help="The beta2 parameter for the Adam optimizer.")
-    parser.add_argument("--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use.")
-    parser.add_argument("--adam_epsilon", type=float, default=1e-08, help="Epsilon value for the Adam optimizer")
-    parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
-    parser.add_argument("--hub_token", type=str, default=None, help="The token to use to push to the Model Hub.")
+    parser.add_argument(
+        "--adam_beta1",
+        type=float,
+        default=0.9,
+        help="The beta1 parameter for the Adam optimizer.",
+    )
+    parser.add_argument(
+        "--adam_beta2",
+        type=float,
+        default=0.999,
+        help="The beta2 parameter for the Adam optimizer.",
+    )
+    parser.add_argument(
+        "--adam_weight_decay", type=float, default=1e-2, help="Weight decay to use."
+    )
+    parser.add_argument(
+        "--adam_epsilon",
+        type=float,
+        default=1e-08,
+        help="Epsilon value for the Adam optimizer",
+    )
+    parser.add_argument(
+        "--max_grad_norm", default=1.0, type=float, help="Max gradient norm."
+    )
+    parser.add_argument(
+        "--push_to_hub",
+        action="store_true",
+        help="Whether or not to push the model to the Hub.",
+    )
+    parser.add_argument(
+        "--hub_token",
+        type=str,
+        default=None,
+        help="The token to use to push to the Model Hub.",
+    )
     parser.add_argument(
         "--hub_model_id",
         type=str,
@@ -281,7 +334,12 @@ def parse_args():
             ' (default), `"wandb"` and `"comet_ml"`. Use `"all"` to report to all integrations.'
         ),
     )
-    parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+    parser.add_argument(
+        "--local_rank",
+        type=int,
+        default=-1,
+        help="For distributed training: local_rank",
+    )
     parser.add_argument(
         "--checkpointing_steps",
         type=int,
@@ -311,9 +369,13 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers."
+        "--enable_xformers_memory_efficient_attention",
+        action="store_true",
+        help="Whether or not to use xformers.",
     )
-    parser.add_argument("--noise_offset", type=float, default=0, help="The scale of noise offset.")
+    parser.add_argument(
+        "--noise_offset", type=float, default=0, help="The scale of noise offset."
+    )
     parser.add_argument(
         "--validation_epochs",
         type=int,
@@ -343,12 +405,10 @@ def parse_args():
 
 
 class Trainer(object):
-    
     def __init__(self, pretrained_model_name_or_path, train_data_dir, args):
-            
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.train_data_dir = train_data_dir
-            
+
         # Sanity checks
         if args.dataset_name is None and self.train_data_dir is None:
             raise ValueError("Need either a dataset name or a training folder.")
@@ -362,15 +422,14 @@ class Trainer(object):
                     " use `--variant=non_ema` instead."
                 ),
             )
-        logging_dir = os.path.join(args.output_dir, args.logging_dir)
-
-        accelerator_project_config = ProjectConfiguration(total_limit=args.checkpoints_total_limit)
+        accelerator_project_config = ProjectConfiguration(
+            total_limit=args.checkpoints_total_limit
+        )
 
         self.accelerator = Accelerator(
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             mixed_precision=args.mixed_precision,
             log_with=args.report_to,
-            logging_dir=logging_dir,
             project_config=accelerator_project_config,
         )
 
@@ -399,34 +458,55 @@ class Trainer(object):
 
             if args.push_to_hub:
                 self.repo_id = create_repo(
-                    repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
+                    repo_id=args.hub_model_id or Path(args.output_dir).name,
+                    exist_ok=True,
+                    token=args.hub_token,
                 ).repo_id
 
         # Load scheduler, tokenizer and models.
-        self.noise_scheduler = DDPMScheduler.from_pretrained(self.pretrained_model_name_or_path, subfolder="scheduler")
+        self.noise_scheduler = DDPMScheduler.from_pretrained(
+            self.pretrained_model_name_or_path, subfolder="scheduler"
+        )
         tokenizer = CLIPTokenizer.from_pretrained(
-            self.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision
+            self.pretrained_model_name_or_path,
+            subfolder="tokenizer",
+            revision=args.revision,
         )
         self.text_encoder = CLIPTextModel.from_pretrained(
-            self.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
+            self.pretrained_model_name_or_path,
+            subfolder="text_encoder",
+            revision=args.revision,
         )
-        self.vae = AutoencoderKL.from_pretrained(self.pretrained_model_name_or_path, subfolder="vae", revision=args.revision)
+        self.vae = AutoencoderKL.from_pretrained(
+            self.pretrained_model_name_or_path, subfolder="vae", revision=args.revision
+        )
         self.unet = UNet2DConditionModel.from_pretrained(
-            self.pretrained_model_name_or_path, subfolder="unet", revision=args.non_ema_revision
+            self.pretrained_model_name_or_path,
+            subfolder="unet",
+            revision=args.non_ema_revision,
         )
-        self.reward_model = pick_score.PickScore()
+
+        self.reward_model_1 = PS.PickScore(device=self.accelerator.device)
+        self.reward_model_2 = RM.ImageReward(device=self.accelerator.device)
 
         # Freeze vae and text_encoder
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
-        self.reward_model.requires_grad_(False)
+        self.reward_model_1.requires_grad_(False)
+        self.reward_model_2.requires_grad_(False)
 
         # Create EMA for the unet.
         if args.use_ema:
             self.ema_unet = UNet2DConditionModel.from_pretrained(
-                self.pretrained_model_name_or_path, subfolder="unet", revision=args.revision
+                self.pretrained_model_name_or_path,
+                subfolder="unet",
+                revision=args.revision,
             )
-            self.ema_unet = EMAModel(self.ema_unet.parameters(), model_cls=UNet2DConditionModel, model_config=self.ema_unet.config)
+            self.ema_unet = EMAModel(
+                self.ema_unet.parameters(),
+                model_cls=UNet2DConditionModel,
+                model_config=self.ema_unet.config,
+            )
 
         if args.enable_xformers_memory_efficient_attention:
             if is_xformers_available():
@@ -439,7 +519,9 @@ class Trainer(object):
                     )
                 self.unet.enable_xformers_memory_efficient_attention()
             else:
-                raise ValueError("xformers is not available. Make sure it is installed correctly")
+                raise ValueError(
+                    "xformers is not available. Make sure it is installed correctly"
+                )
 
         # `accelerate` 0.16.0 will have better support for customized saving
         if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
@@ -456,7 +538,9 @@ class Trainer(object):
 
             def load_model_hook(models, input_dir):
                 if args.use_ema:
-                    load_model = EMAModel.from_pretrained(os.path.join(input_dir, "unet_ema"), UNet2DConditionModel)
+                    load_model = EMAModel.from_pretrained(
+                        os.path.join(input_dir, "unet_ema"), UNet2DConditionModel
+                    )
                     self.ema_unet.load_state_dict(load_model.state_dict())
                     self.ema_unet.to(self.accelerator.device)
                     del load_model
@@ -466,7 +550,9 @@ class Trainer(object):
                     model = models.pop()
 
                     # load diffusers style into model
-                    load_model = UNet2DConditionModel.from_pretrained(input_dir, subfolder="unet")
+                    load_model = UNet2DConditionModel.from_pretrained(
+                        input_dir, subfolder="unet"
+                    )
                     model.register_to_config(**load_model.config)
 
                     model.load_state_dict(load_model.state_dict())
@@ -485,7 +571,10 @@ class Trainer(object):
 
         if args.scale_lr:
             args.learning_rate = (
-                args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * self.accelerator.num_processes
+                args.learning_rate
+                * args.gradient_accumulation_steps
+                * args.train_batch_size
+                * self.accelerator.num_processes
             )
 
         # Initialize the optimizer
@@ -539,7 +628,9 @@ class Trainer(object):
         # Get the column names for input/target.
         dataset_columns = DATASET_NAME_MAPPING.get(args.dataset_name, None)
         if args.image_column is None:
-            image_column = dataset_columns[0] if dataset_columns is not None else column_names[0]
+            image_column = (
+                dataset_columns[0] if dataset_columns is not None else column_names[0]
+            )
         else:
             image_column = args.image_column
             if image_column not in column_names:
@@ -547,7 +638,9 @@ class Trainer(object):
                     f"--image_column' value '{args.image_column}' needs to be one of: {', '.join(column_names)}"
                 )
         if args.caption_column is None:
-            caption_column = dataset_columns[1] if dataset_columns is not None else column_names[1]
+            caption_column = (
+                dataset_columns[1] if dataset_columns is not None else column_names[1]
+            )
         else:
             caption_column = args.caption_column
             if caption_column not in column_names:
@@ -570,37 +663,57 @@ class Trainer(object):
                         f"Caption column `{caption_column}` should contain either strings or lists of strings."
                     )
             inputs = tokenizer(
-                captions, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
+                captions,
+                max_length=tokenizer.model_max_length,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
             )
             return inputs.input_ids
 
         def preprocess_train(examples):
             examples["input_ids"] = tokenize_captions(examples)
-            processed = self.reward_model.tokenize(
-                examples[caption_column],
-                padding='max_length',
-                truncation=True,
-                max_length=77,
-                return_tensors="pt"
+            (
+                examples["rm_input_ids_1"],
+                examples["rm_attention_mask_1"],
+            ) = self.reward_model_1.tokenize(
+                caption=examples[caption_column],
             )
-            examples["rm_input_ids"] = processed.input_ids
-            examples["rm_attention_mask"] = processed.attention_mask
+
+            (
+                examples["rm_input_ids_2"],
+                examples["rm_attention_mask_2"],
+            ) = self.reward_model_2.tokenize(
+                caption=examples[caption_column],
+            )
             return examples
 
         with self.accelerator.main_process_first():
             if args.max_train_samples is not None:
-                dataset["train"] = dataset["train"].shuffle(seed=args.seed).select(range(args.max_train_samples))
+                dataset["train"] = (
+                    dataset["train"]
+                    .shuffle(seed=args.seed)
+                    .select(range(args.max_train_samples))
+                )
             # Set the training transforms
             self.train_dataset = dataset["train"].with_transform(preprocess_train)
 
         def collate_fn(examples):
             input_ids = torch.stack([example["input_ids"] for example in examples])
-            rm_input_ids = torch.stack([example["rm_input_ids"] for example in examples])
-            rm_attention_mask = torch.stack([example["rm_attention_mask"] for example in examples])
+            rm_input_ids = torch.stack(
+                [example["rm_input_ids"] for example in examples]
+            )
+            rm_attention_mask = torch.stack(
+                [example["rm_attention_mask"] for example in examples]
+            )
             input_ids = input_ids.view(-1, input_ids.shape[-1])
             rm_input_ids = rm_input_ids.view(-1, rm_input_ids.shape[-1])
             rm_attention_mask = rm_attention_mask.view(-1, rm_attention_mask.shape[-1])
-            return {"input_ids": input_ids, "rm_input_ids": rm_input_ids, "rm_attention_mask": rm_attention_mask}
+            return {
+                "input_ids": input_ids,
+                "rm_input_ids": rm_input_ids,
+                "rm_attention_mask": rm_attention_mask,
+            }
 
         # DataLoaders creation:
         self.train_dataloader = torch.utils.data.DataLoader(
@@ -613,9 +726,13 @@ class Trainer(object):
 
         # Scheduler and math around the number of training steps.
         overrode_max_train_steps = False
-        self.num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / args.gradient_accumulation_steps)
+        self.num_update_steps_per_epoch = math.ceil(
+            len(self.train_dataloader) / args.gradient_accumulation_steps
+        )
         if args.max_train_steps is None:
-            args.max_train_steps = args.num_train_epochs * self.num_update_steps_per_epoch
+            args.max_train_steps = (
+                args.num_train_epochs * self.num_update_steps_per_epoch
+            )
             overrode_max_train_steps = True
 
         self.lr_scheduler = get_scheduler(
@@ -626,7 +743,12 @@ class Trainer(object):
         )
 
         # Prepare everything with our `self.accelerator`.
-        self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler = self.accelerator.prepare(
+        (
+            self.unet,
+            self.optimizer,
+            self.train_dataloader,
+            self.lr_scheduler,
+        ) = self.accelerator.prepare(
             self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler
         )
 
@@ -647,11 +769,17 @@ class Trainer(object):
         self.reward_model.to(self.accelerator.device, dtype=self.weight_dtype)
 
         # We need to recalculate our total training steps as the size of the training dataloader may have changed.
-        self.num_update_steps_per_epoch = math.ceil(len(self.train_dataloader) / args.gradient_accumulation_steps)
+        self.num_update_steps_per_epoch = math.ceil(
+            len(self.train_dataloader) / args.gradient_accumulation_steps
+        )
         if overrode_max_train_steps:
-            args.max_train_steps = args.num_train_epochs * self.num_update_steps_per_epoch
+            args.max_train_steps = (
+                args.num_train_epochs * self.num_update_steps_per_epoch
+            )
         # Afterwards we recalculate our number of training epochs
-        args.num_train_epochs = math.ceil(args.max_train_steps / self.num_update_steps_per_epoch)
+        args.num_train_epochs = math.ceil(
+            args.max_train_steps / self.num_update_steps_per_epoch
+        )
 
         # We need to initialize the trackers we use, and also store our configuration.
         # The trackers initializes automatically on the main process.
@@ -660,18 +788,24 @@ class Trainer(object):
             tracker_config.pop("validation_prompts")
             self.accelerator.init_trackers(args.tracker_project_name, tracker_config)
 
-    
     def train(self, args):
-            
         # Train!
-        total_batch_size = args.train_batch_size * self.accelerator.num_processes * args.gradient_accumulation_steps
+        total_batch_size = (
+            args.train_batch_size
+            * self.accelerator.num_processes
+            * args.gradient_accumulation_steps
+        )
 
         logger.info("***** Running training *****")
         logger.info(f"  Num examples = {len(self.train_dataset)}")
         logger.info(f"  Num Epochs = {args.num_train_epochs}")
         logger.info(f"  Instantaneous batch size per device = {args.train_batch_size}")
-        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-        logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+        logger.info(
+            f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}"
+        )
+        logger.info(
+            f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}"
+        )
         logger.info(f"  Total optimization steps = {args.max_train_steps}")
         global_step = 0
         first_epoch = 0
@@ -699,10 +833,15 @@ class Trainer(object):
 
                 resume_global_step = global_step * args.gradient_accumulation_steps
                 first_epoch = global_step // self.num_update_steps_per_epoch
-                resume_step = resume_global_step % (self.num_update_steps_per_epoch * args.gradient_accumulation_steps)
+                resume_step = resume_global_step % (
+                    self.num_update_steps_per_epoch * args.gradient_accumulation_steps
+                )
 
         # Only show the progress bar once on each machine.
-        progress_bar = tqdm(range(global_step, args.max_train_steps), disable=not self.accelerator.is_local_main_process)
+        progress_bar = tqdm(
+            range(global_step, args.max_train_steps),
+            disable=not self.accelerator.is_local_main_process,
+        )
         progress_bar.set_description("Steps")
 
         for epoch in range(first_epoch, args.num_train_epochs):
@@ -710,16 +849,25 @@ class Trainer(object):
             train_loss = 0.0
             for step, batch in enumerate(self.train_dataloader):
                 # Skip steps until we reach the resumed step
-                if args.resume_from_checkpoint and epoch == first_epoch and step < resume_step:
+                if (
+                    args.resume_from_checkpoint
+                    and epoch == first_epoch
+                    and step < resume_step
+                ):
                     if step % args.gradient_accumulation_steps == 0:
                         progress_bar.update(1)
                     continue
 
                 with self.accelerator.accumulate(self.unet):
                     encoder_hidden_states = self.text_encoder(batch["input_ids"])[0]
-                    latents = torch.randn((args.train_batch_size, 4, 64, 64), device=self.accelerator.device)
-                    
-                    self.noise_scheduler.set_timesteps(40, device=self.accelerator.device)
+                    latents = torch.randn(
+                        (args.train_batch_size, 4, 64, 64),
+                        device=self.accelerator.device,
+                    )
+
+                    self.noise_scheduler.set_timesteps(
+                        40, device=self.accelerator.device
+                    )
                     timesteps = self.noise_scheduler.timesteps
 
                     mid_timestep = random.randint(30, 39)
@@ -727,54 +875,79 @@ class Trainer(object):
                     for i, t in enumerate(timesteps[:mid_timestep]):
                         with torch.no_grad():
                             latent_model_input = latents
-                            latent_model_input = self.noise_scheduler.scale_model_input(latent_model_input, t)
+                            latent_model_input = self.noise_scheduler.scale_model_input(
+                                latent_model_input, t
+                            )
                             noise_pred = self.unet(
                                 latent_model_input,
                                 t,
                                 encoder_hidden_states=encoder_hidden_states,
                             ).sample
-                            latents = self.noise_scheduler.step(noise_pred, t, latents).prev_sample
-                    
+                            latents = self.noise_scheduler.step(
+                                noise_pred, t, latents
+                            ).prev_sample
+
                     latent_model_input = latents
-                    latent_model_input = self.noise_scheduler.scale_model_input(latent_model_input, timesteps[mid_timestep])
+                    latent_model_input = self.noise_scheduler.scale_model_input(
+                        latent_model_input, timesteps[mid_timestep]
+                    )
                     noise_pred = self.unet(
                         latent_model_input,
                         timesteps[mid_timestep],
                         encoder_hidden_states=encoder_hidden_states,
                     ).sample
-                    pred_original_sample = self.noise_scheduler.step(noise_pred, timesteps[mid_timestep], latents).pred_original_sample.to(self.weight_dtype)
-                    
-                    pred_original_sample = 1 / self.vae.config.scaling_factor * pred_original_sample
-                    image = self.vae.decode(pred_original_sample.to(self.weight_dtype)).sample
+                    pred_original_sample = self.noise_scheduler.step(
+                        noise_pred, timesteps[mid_timestep], latents
+                    ).pred_original_sample.to(self.weight_dtype)
+
+                    pred_original_sample = (
+                        1 / self.vae.config.scaling_factor * pred_original_sample
+                    )
+                    image = self.vae.decode(
+                        pred_original_sample.to(self.weight_dtype)
+                    ).sample
+                    image = self.image_processor.postprocess(
+                        image, output_type="pt", do_denormalize=[True] * image.shape[0]
+                    )
                     image = (image / 2 + 0.5).clamp(0, 1)
 
                     # image encode
                     def _transform():
-                        return Compose([
-                            Resize(224, interpolation=BICUBIC),
-                            CenterCrop(224),
-                            Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
-                        ])
-                    
+                        return Compose(
+                            [
+                                Resize(224, interpolation=BICUBIC),
+                                CenterCrop(224),
+                                Normalize(
+                                    (0.48145466, 0.4578275, 0.40821073),
+                                    (0.26862954, 0.26130258, 0.27577711),
+                                ),
+                            ]
+                        )
+
                     rm_preprocess = _transform()
                     image = rm_preprocess(image).to(self.accelerator.device)
-                    
-                    rewards = self.reward_model.score_gard(
-                        batch["rm_input_ids"], batch["rm_attention_mask"], image
+                    torch.save(image.cpu(), "image_example")
+
+                    rewards = self.reward_model_1.score_grad(
+                        batch["rm_input_ids_1"], batch["rm_attention_mask_1"], image
+                    ) + self.reward_model_2.score_grad(
+                        batch["rm_input_ids_2"], batch["rm_attention_mask_2"], image
                     )
-                    print(rewards)
-                    print('image shape:', type(image))
-                    loss = F.relu(-rewards+2)
+                    loss = F.relu(-rewards * 0.5 + 2)
                     loss = loss.mean() * args.grad_scale
 
                     # Gather the losses across all processes for logging (if we use distributed training).
-                    avg_loss = self.accelerator.gather(loss.repeat(args.train_batch_size)).mean()
+                    avg_loss = self.accelerator.gather(
+                        loss.repeat(args.train_batch_size)
+                    ).mean()
                     train_loss += avg_loss.item() / args.gradient_accumulation_steps
 
                     # Backpropagate
                     self.accelerator.backward(loss)
                     if self.accelerator.sync_gradients:
-                        self.accelerator.clip_grad_norm_(self.unet.parameters(), args.max_grad_norm)
+                        self.accelerator.clip_grad_norm_(
+                            self.unet.parameters(), args.max_grad_norm
+                        )
                     self.optimizer.step()
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad()
@@ -786,22 +959,33 @@ class Trainer(object):
                     progress_bar.update(1)
                     global_step += 1
                     self.accelerator.log({"train_loss": train_loss}, step=global_step)
+                    if is_wandb_available():
+                        wandb.log({"train_loss": train_loss}, step=global_step)
+                        wandb.log({"train_reward": 2 - train_loss}, step=global_step)
                     train_loss = 0.0
 
                     if global_step % args.checkpointing_steps == 0:
                         if self.accelerator.is_main_process:
-                            save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                            save_path = os.path.join(
+                                args.output_dir, f"checkpoint-{global_step}"
+                            )
                             self.accelerator.save_state(save_path)
                             logger.info(f"Saved state to {save_path}")
 
-                logs = {"step_loss": loss.detach().item(), "lr": self.lr_scheduler.get_last_lr()[0]}
+                logs = {
+                    "step_loss": loss.detach().item(),
+                    "lr": self.lr_scheduler.get_last_lr()[0],
+                }
                 progress_bar.set_postfix(**logs)
 
                 if global_step >= args.max_train_steps:
                     break
 
             if self.accelerator.is_main_process:
-                if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
+                if (
+                    args.validation_prompts is not None
+                    and epoch % args.validation_epochs == 0
+                ):
                     if args.use_ema:
                         # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
                         self.ema_unet.store(self.unet.parameters())
@@ -835,4 +1019,3 @@ class Trainer(object):
                 )
 
         self.accelerator.end_training()
-
