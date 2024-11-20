@@ -989,6 +989,7 @@ class Trainer(object):
                         reward_2.mean().detach().item() * self.reward_model_2.std
                         + self.reward_model_2.mean
                     )
+                    kl_loss_log = kl_loss.mean().detach().item()
 
                     # Gather the losses across all processes for logging (if we use distributed training).
                     avg_loss = self.accelerator.gather(
@@ -1017,6 +1018,7 @@ class Trainer(object):
                         wandb.log({"step_loss": loss.detach().item()}, step=global_step)
                         wandb.log({"reward_1": reward_1}, step=global_step)
                         wandb.log({"reward_2": reward_2}, step=global_step)
+                        wandb.log({"kl_loss_log": kl_loss_log}, step=global_step)
                         wandb.log(
                             {
                                 "lr": self.lr_scheduler.get_last_lr()[0],
