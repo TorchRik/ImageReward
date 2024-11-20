@@ -55,6 +55,7 @@ from diffusers.utils.import_utils import is_xformers_available
 
 if is_wandb_available():
     import wandb
+
     wandb.init()
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.16.0.dev0")
@@ -70,6 +71,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
     parser.add_argument(
         "--grad_scale",
+        type=float,
+        default=1e-3,
+        help="Scale divided for grad loss value.",
+    )
+    parser.add_argument(
+        "--kl_beta",
         type=float,
         default=1e-3,
         help="Scale divided for grad loss value.",
@@ -484,11 +491,15 @@ class Trainer(object):
             subfolder="unet",
             revision=args.non_ema_revision,
         )
+        self.unet_frozen = UNet2DConditionModel.from_pretrained(
+            self.pretrained_model_name_or_path,
+            subfolder="unet",
+            revision=args.non_ema_revision,
+        )
 
         self.reward_model_1 = RM.PickScore(device=self.accelerator.device)
         self.reward_model_2 = RM.load(
-            "ImageReward-v1.0",
-            device=self.accelerator.device
+            "ImageReward-v1.0", device=self.accelerator.device
         )
 
         # Freeze vae and text_encoder
@@ -496,6 +507,7 @@ class Trainer(object):
         self.text_encoder.requires_grad_(False)
         self.reward_model_1.requires_grad_(False)
         self.reward_model_2.requires_grad_(False)
+        self.unet_frozen.requires_grad_(False)
 
         # Create EMA for the unet.
         if args.use_ema:
@@ -711,7 +723,9 @@ class Trainer(object):
                 [example["rm_attention_mask_1"] for example in examples]
             )
             rm_input_ids_1 = rm_input_ids_1.view(-1, rm_input_ids_1.shape[-1])
-            rm_attention_mask_1 = rm_attention_mask_1.view(-1, rm_attention_mask_1.shape[-1])
+            rm_attention_mask_1 = rm_attention_mask_1.view(
+                -1, rm_attention_mask_1.shape[-1]
+            )
 
             rm_input_ids_2 = torch.stack(
                 [example["rm_input_ids_2"] for example in examples]
@@ -720,9 +734,9 @@ class Trainer(object):
                 [example["rm_attention_mask_2"] for example in examples]
             )
             rm_input_ids_2 = rm_input_ids_2.view(-1, rm_input_ids_2.shape[-1])
-            rm_attention_mask_2 = rm_attention_mask_2.view(-1,
-                                                           rm_attention_mask_2.shape[
-                                                               -1])
+            rm_attention_mask_2 = rm_attention_mask_2.view(
+                -1, rm_attention_mask_2.shape[-1]
+            )
             return {
                 "input_ids": input_ids,
                 "rm_input_ids_1": rm_input_ids_1,
@@ -875,7 +889,7 @@ class Trainer(object):
                         progress_bar.update(1)
                     continue
 
-                with (self.accelerator.accumulate(self.unet)):
+                with self.accelerator.accumulate(self.unet):
                     encoder_hidden_states = self.text_encoder(batch["input_ids"])[0]
                     latents = torch.randn(
                         (args.train_batch_size, 4, 64, 64),
@@ -913,6 +927,15 @@ class Trainer(object):
                         timesteps[mid_timestep],
                         encoder_hidden_states=encoder_hidden_states,
                     ).sample
+                    frozen_noize_pred = self.unet_frozen(
+                        latent_model_input,
+                        timesteps[mid_timestep],
+                        encoder_hidden_states=encoder_hidden_states,
+                    ).sample
+                    kl_loss = (
+                        (noise_pred - frozen_noize_pred).pow(2).mean(dim=[1, 2, 3])
+                    )
+
                     pred_original_sample = self.noise_scheduler.step(
                         noise_pred, timesteps[mid_timestep], latents
                     ).pred_original_sample.to(self.weight_dtype)
@@ -951,17 +974,15 @@ class Trainer(object):
                         batch["rm_input_ids_2"], batch["rm_attention_mask_2"], image
                     )
                     rewards = reward_1 + reward_2
-                    loss = F.relu(-rewards * 0.5 + 2)
+                    loss = F.relu(-rewards * 0.5 + 2) + kl_loss * args.kl_beta
                     loss = loss.mean() * args.grad_scale
                     reward_1 = (
-                            reward_1.mean().detach().item() *
-                            self.reward_model_1.std +
-                            self.reward_model_1.mean
+                        reward_1.mean().detach().item() * self.reward_model_1.std
+                        + self.reward_model_1.mean
                     )
                     reward_2 = (
-                            reward_2.mean().detach().item() *
-                            self.reward_model_2.std +
-                            self.reward_model_2.mean
+                        reward_2.mean().detach().item() * self.reward_model_2.std
+                        + self.reward_model_2.mean
                     )
 
                     # Gather the losses across all processes for logging (if we use distributed training).
@@ -988,14 +1009,15 @@ class Trainer(object):
                     global_step += 1
                     self.accelerator.log({"train_loss": train_loss}, step=global_step)
                     if is_wandb_available():
-                        wandb.log({"step_loss": loss.detach().item()},
-                                  step=global_step)
-                        wandb.log({"reward_1": reward_1},
-                                  step=global_step)
-                        wandb.log({"reward_2": reward_2},
-                                  step=global_step)
-                        wandb.log({"lr": self.lr_scheduler.get_last_lr()[0], },
-                                  step=global_step)
+                        wandb.log({"step_loss": loss.detach().item()}, step=global_step)
+                        wandb.log({"reward_1": reward_1}, step=global_step)
+                        wandb.log({"reward_2": reward_2}, step=global_step)
+                        wandb.log(
+                            {
+                                "lr": self.lr_scheduler.get_last_lr()[0],
+                            },
+                            step=global_step,
+                        )
 
                     train_loss = 0.0
 
