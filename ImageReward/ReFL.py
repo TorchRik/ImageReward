@@ -775,11 +775,16 @@ class Trainer(object):
         # Prepare everything with our `self.accelerator`.
         (
             self.unet,
+            self.unet_frozen,
             self.optimizer,
             self.train_dataloader,
             self.lr_scheduler,
         ) = self.accelerator.prepare(
-            self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler
+            self.unet,
+                self.unet_frozen,
+                self.optimizer,
+                self.train_dataloader,
+                self.lr_scheduler
         )
 
         if args.use_ema:
