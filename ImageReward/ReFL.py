@@ -28,11 +28,11 @@ from datasets import load_dataset
 from huggingface_hub import create_repo, upload_folder
 from packaging import version
 from PIL import Image
-from torchvision.transforms import CenterCrop, Compose, Normalize, Resize, ToTensor
+from torchvision.transforms import CenterCrop, Compose, Normalize, Resize
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer
 
-import ImageReward as RM
+from .reward_models import CombinedRewardModel, ImageReward, PickScore
 
 try:
     from torchvision.transforms import InterpolationMode
@@ -78,8 +78,8 @@ def parse_args():
     parser.add_argument(
         "--kl_beta",
         type=float,
-        default=1e-3,
-        help="Scale divided for grad loss value.",
+        default=0,
+        help="Coefficient of KL divergence.",
     )
     parser.add_argument(
         "--input_pertubation",
@@ -491,23 +491,27 @@ class Trainer(object):
             subfolder="unet",
             revision=args.non_ema_revision,
         )
-        self.unet_frozen = UNet2DConditionModel.from_pretrained(
-            self.pretrained_model_name_or_path,
-            subfolder="unet",
-            revision=args.non_ema_revision,
-        )
+        if args.kl_beta:
+            self.frozen_unet = UNet2DConditionModel.from_pretrained(
+                self.pretrained_model_name_or_path,
+                subfolder="unet",
+                revision=args.non_ema_revision,
+            )
 
-        self.reward_model_1 = RM.PickScore(device=self.accelerator.device)
-        self.reward_model_2 = RM.load(
-            "ImageReward-v1.0", device=self.accelerator.device
+        self.reward_model = CombinedRewardModel(
+            models=[
+                PickScore(device=self.accelerator.device),
+            ],
+            device=self.accelerator.device,
         )
 
         # Freeze vae and text_encoder
         self.vae.requires_grad_(False)
         self.text_encoder.requires_grad_(False)
-        self.reward_model_1.requires_grad_(False)
-        self.reward_model_2.requires_grad_(False)
-        self.unet_frozen.requires_grad_(False)
+        self.reward_model.requires_grad_(False)
+
+        if args.kl_beta:
+            self.frozen_unet.requires_grad_(False)
 
         # Create EMA for the unet.
         if args.use_ema:
@@ -687,19 +691,7 @@ class Trainer(object):
 
         def preprocess_train(examples):
             examples["input_ids"] = tokenize_captions(examples)
-            (
-                examples["rm_input_ids_1"],
-                examples["rm_attention_mask_1"],
-            ) = self.reward_model_1.tokenize(
-                caption=examples[caption_column],
-            )
-
-            (
-                examples["rm_input_ids_2"],
-                examples["rm_attention_mask_2"],
-            ) = self.reward_model_2.tokenize(
-                caption=examples[caption_column],
-            )
+            examples = self.reward_model.tokenize(examples, caption_column)
             return examples
 
         with self.accelerator.main_process_first():
@@ -713,37 +705,20 @@ class Trainer(object):
             self.train_dataset = dataset["train"].with_transform(preprocess_train)
 
         def collate_fn(examples):
-            input_ids = torch.stack([example["input_ids"] for example in examples])
-            input_ids = input_ids.view(-1, input_ids.shape[-1])
+            columns = [
+                column
+                for column in examples[0]
+                if "input_ids" in column or "attention_mask" in column
+            ]
+            res = {}
+            for id_column in columns:
+                stacked_column = torch.stack(
+                    [example[id_column] for example in examples]
+                )
+                stacked_column = stacked_column.view(-1, stacked_column.shape[-1])
+                res[id_column] = stacked_column
 
-            rm_input_ids_1 = torch.stack(
-                [example["rm_input_ids_1"] for example in examples]
-            )
-            rm_attention_mask_1 = torch.stack(
-                [example["rm_attention_mask_1"] for example in examples]
-            )
-            rm_input_ids_1 = rm_input_ids_1.view(-1, rm_input_ids_1.shape[-1])
-            rm_attention_mask_1 = rm_attention_mask_1.view(
-                -1, rm_attention_mask_1.shape[-1]
-            )
-
-            rm_input_ids_2 = torch.stack(
-                [example["rm_input_ids_2"] for example in examples]
-            )
-            rm_attention_mask_2 = torch.stack(
-                [example["rm_attention_mask_2"] for example in examples]
-            )
-            rm_input_ids_2 = rm_input_ids_2.view(-1, rm_input_ids_2.shape[-1])
-            rm_attention_mask_2 = rm_attention_mask_2.view(
-                -1, rm_attention_mask_2.shape[-1]
-            )
-            return {
-                "input_ids": input_ids,
-                "rm_input_ids_1": rm_input_ids_1,
-                "rm_attention_mask_1": rm_attention_mask_1,
-                "rm_input_ids_2": rm_input_ids_2,
-                "rm_attention_mask_2": rm_attention_mask_2,
-            }
+            return res
 
         # DataLoaders creation:
         self.train_dataloader = torch.utils.data.DataLoader(
@@ -773,19 +748,29 @@ class Trainer(object):
         )
 
         # Prepare everything with our `self.accelerator`.
-        (
-            self.unet,
-            self.unet_frozen,
-            self.optimizer,
-            self.train_dataloader,
-            self.lr_scheduler,
-        ) = self.accelerator.prepare(
-            self.unet,
-                self.unet_frozen,
+        if args.kl_beta > 0:
+            (
+                self.unet,
+                self.frozen_unet,
                 self.optimizer,
                 self.train_dataloader,
-                self.lr_scheduler
-        )
+                self.lr_scheduler,
+            ) = self.accelerator.prepare(
+                self.unet,
+                self.frozen_unet,
+                self.optimizer,
+                self.train_dataloader,
+                self.lr_scheduler,
+            )
+        else:
+            (
+                self.unet,
+                self.optimizer,
+                self.train_dataloader,
+                self.lr_scheduler,
+            ) = self.accelerator.prepare(
+                self.unet, self.optimizer, self.train_dataloader, self.lr_scheduler
+            )
 
         if args.use_ema:
             self.ema_unet.to(self.accelerator.device)
@@ -932,14 +917,15 @@ class Trainer(object):
                         timesteps[mid_timestep],
                         encoder_hidden_states=encoder_hidden_states,
                     ).sample
-                    frozen_noize_pred = self.unet_frozen(
-                        latent_model_input,
-                        timesteps[mid_timestep],
-                        encoder_hidden_states=encoder_hidden_states,
-                    ).sample
-                    kl_loss = (
-                        (noise_pred - frozen_noize_pred).pow(2).mean(dim=[1, 2, 3])
-                    )
+                    if args.kl_beta > 0:
+                        frozen_noize_pred = self.frozen_unet(
+                            latent_model_input,
+                            timesteps[mid_timestep],
+                            encoder_hidden_states=encoder_hidden_states,
+                        ).sample
+                        kl_loss = (
+                            (noise_pred - frozen_noize_pred).pow(2).mean(dim=[1, 2, 3])
+                        )
 
                     pred_original_sample = self.noise_scheduler.step(
                         noise_pred, timesteps[mid_timestep], latents
@@ -951,9 +937,6 @@ class Trainer(object):
                     image = self.vae.decode(
                         pred_original_sample.to(self.weight_dtype)
                     ).sample
-                    # image = self.image_processor.postprocess(
-                    #     image, output_type="pt", do_denormalize=[True] * image.shape[0]
-                    # )
                     image = (image / 2 + 0.5).clamp(0, 1)
 
                     # image encode
@@ -972,22 +955,11 @@ class Trainer(object):
                     rm_preprocess = _transform()
                     image = rm_preprocess(image).to(self.accelerator.device)
 
-                    reward_1 = self.reward_model_1.score_grad(
-                        batch["rm_input_ids_1"], batch["rm_attention_mask_1"], image
-                    )
-                    reward_2 = self.reward_model_2.score_grad(
-                        batch["rm_input_ids_2"], batch["rm_attention_mask_2"], image
-                    )
-                    rewards = reward_1 + reward_2
-                    loss = F.relu(-rewards * 0.5 + 2) + kl_loss * args.kl_beta
-                    loss = loss.mean() * args.grad_scale
-                    reward_1 = (
-                        reward_1.mean().detach().item() * self.reward_model_1.std
-                        + self.reward_model_1.mean
-                    )
-                    reward_2 = (
-                        reward_2.mean().detach().item() * self.reward_model_2.std
-                        + self.reward_model_2.mean
+                    reward_loss, reward_log = self.reward_model.score_grad(batch, image)
+
+                    loss = (
+                        reward_loss.mean() * args.grad_scale
+                        + kl_loss.mean() * args.kl_beta
                     )
                     kl_loss_log = kl_loss.mean().detach().item()
 
@@ -1015,9 +987,13 @@ class Trainer(object):
                     global_step += 1
                     self.accelerator.log({"train_loss": train_loss}, step=global_step)
                     if is_wandb_available():
+                        if global_step % 50 == 0:
+                            images = wandb.Image(image)
+                            wandb.log({"generated images": images})
+
                         wandb.log({"step_loss": loss.detach().item()}, step=global_step)
-                        wandb.log({"reward_1": reward_1}, step=global_step)
-                        wandb.log({"reward_2": reward_2}, step=global_step)
+                        for reward in reward_log:
+                            wandb.log({reward: reward_log[reward]}, step=global_step)
                         wandb.log({"kl_loss_log": kl_loss_log}, step=global_step)
                         wandb.log(
                             {

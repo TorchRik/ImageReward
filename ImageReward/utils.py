@@ -13,16 +13,16 @@
 
 import os
 import urllib
-from typing import Any, List, Union
+from typing import List, Union
 
 import torch
 from huggingface_hub import hf_hub_download
 from tqdm import tqdm
 
-from .ImageReward import ImageReward
 from .models.AestheticScore import AestheticScore
 from .models.BLIPScore import BLIPScore
 from .models.CLIPScore import CLIPScore
+from .reward_models.ImageReward import ImageReward
 
 _MODELS = {
     "ImageReward-v1.0": "https://huggingface.co/THUDM/ImageReward/blob/main/ImageReward.pt",
